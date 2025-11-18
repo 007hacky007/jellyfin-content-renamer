@@ -350,7 +350,12 @@ def get_media_duration(file_path: str) -> Optional[int]:
     return minutes if minutes > 0 else None
 
 
-def select_result_simple(results: Sequence[dict], query: str, auto_choice: Optional[int]) -> Tuple[str, Optional[dict]]:
+def select_result_simple(
+    results: Sequence[dict],
+    query: str,
+    auto_choice: Optional[int],
+    suggest_skip: bool = False,
+) -> Tuple[str, Optional[dict]]:
     if not results:
         return ("skip", None)
     if auto_choice is not None:
@@ -360,9 +365,12 @@ def select_result_simple(results: Sequence[dict], query: str, auto_choice: Optio
     print(f"\nFound {len(results)} result(s) for '{query}':")
     for idx, result in enumerate(results, start=1):
         print(format_result(idx, result))
+    if suggest_skip:
+        print("\nSuggestion: current name already matches the first CSFD hit. Press Enter to skip.")
     print(
-        "\nChoose an option: [1-{}], Enter to accept #1, 'r' to refine search, 's' to skip, or 'q' to abort.".format(
-            len(results)
+        "\nChoose an option: [1-{}], Enter to {}#1, 'r' refine, 's' skip, 'q' abort.".format(
+            len(results),
+            "skip | accept " if suggest_skip else "accept ",
         )
     )
     while True:
@@ -372,6 +380,8 @@ def select_result_simple(results: Sequence[dict], query: str, auto_choice: Optio
         if choice in {"s", "skip"}:
             return ("skip", None)
         if choice == "":
+            if suggest_skip:
+                return ("skip", None)
             return ("accept", results[0])
         if choice.startswith("r"):
             return ("refine", None)
@@ -387,7 +397,8 @@ class SearchTUI:
         self.query = query
         self.results = list(results)
         self.context = context or {}
-        self.selected = 0
+        self.suggest_skip = bool(self.context.get("suggest_skip"))
+        self.selected = -1 if self.suggest_skip else 0
         self.top = 0
         self.outcome: Tuple[str, Optional[dict]] = ("skip", None)
         self.colors: Dict[str, int] = {}
@@ -427,11 +438,20 @@ class SearchTUI:
             elif key in (curses.KEY_NPAGE, ord("f")):
                 self._move_selection(5)
             elif key == curses.KEY_HOME:
-                self.selected = 0
+                self.selected = -1 if self.results else -1
+                self.top = 0
             elif key == curses.KEY_END:
-                self.selected = len(self.results) - 1
+                self.selected = len(self.results) - 1 if self.results else -1
+                if self.selected >= 0:
+                    visible = max(1, self._visible_items())
+                    self.top = max(0, self.selected - visible + 1)
+                else:
+                    self.top = 0
             elif key in (10, 13, curses.KEY_ENTER):
-                self.outcome = ("accept", self.results[self.selected])
+                if self.selected == -1:
+                    self.outcome = ("skip", None)
+                else:
+                    self.outcome = ("accept", self.results[self.selected])
                 break
             elif key in (ord("r"), ord("R")):
                 self.outcome = ("refine", None)
@@ -448,31 +468,54 @@ class SearchTUI:
             self.colors = {
                 "selected": curses.A_REVERSE | curses.A_BOLD,
                 "progress": curses.A_BOLD,
+                "progress_bar": curses.A_BOLD,
                 "info": curses.A_DIM,
                 "year": curses.A_BOLD,
                 "url": curses.A_DIM,
                 "length": curses.A_BOLD,
+                "delta_low": curses.A_BOLD,
+                "delta_medium": curses.A_BOLD,
+                "delta_high": curses.A_BOLD,
+                "skip": curses.A_BOLD,
             }
             return
-        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
         curses.init_pair(2, curses.COLOR_CYAN, -1)
-        curses.init_pair(3, curses.COLOR_GREEN, -1)
+        curses.init_pair(3, curses.COLOR_WHITE, -1)
         curses.init_pair(4, curses.COLOR_YELLOW, -1)
         curses.init_pair(5, curses.COLOR_MAGENTA, -1)
-        curses.init_pair(6, curses.COLOR_WHITE, -1)
+        curses.init_pair(6, curses.COLOR_CYAN, -1)
+        curses.init_pair(7, curses.COLOR_GREEN, -1)
+        curses.init_pair(8, curses.COLOR_YELLOW, -1)
+        curses.init_pair(9, curses.COLOR_RED, -1)
+        curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_YELLOW)
         self.colors = {
             "selected": curses.color_pair(1) | curses.A_BOLD,
             "progress": curses.color_pair(2) | curses.A_BOLD,
+            "progress_bar": curses.color_pair(2),
             "info": curses.color_pair(3),
             "year": curses.color_pair(4) | curses.A_BOLD,
             "url": curses.color_pair(5) | curses.A_DIM,
             "length": curses.color_pair(6) | curses.A_BOLD,
+            "delta_low": curses.color_pair(7) | curses.A_BOLD,
+            "delta_medium": curses.color_pair(8) | curses.A_BOLD,
+            "delta_high": curses.color_pair(9) | curses.A_BOLD,
+            "skip": curses.color_pair(10) | curses.A_BOLD,
         }
 
     def _move_selection(self, delta: int) -> None:
         if not self.results:
+            self.selected = -1
+            self.top = 0
             return
-        self.selected = max(0, min(self.selected + delta, len(self.results) - 1))
+        new_selected = self.selected + delta
+        new_selected = max(-1, min(new_selected, len(self.results) - 1))
+        if new_selected == self.selected:
+            return
+        self.selected = new_selected
+        if self.selected < 0:
+            self.top = 0
+            return
         if self.selected < self.top:
             self.top = self.selected
         visible = max(1, self._visible_items())
@@ -494,6 +537,7 @@ class SearchTUI:
         self.context["_cached_height"] = height
         progress_line = self._build_progress_line()
         self._addstr(stdscr, 0, 0, progress_line.ljust(width), self.colors.get("progress", curses.A_BOLD))
+        self._draw_progress_bar(stdscr, 1, width)
 
         file_line, query_line, duration_line = self._build_header_lines(width)
         self._write_highlighted(
@@ -524,6 +568,14 @@ class SearchTUI:
             self.colors.get("info", curses.A_DIM),
         )
 
+        skip_label = "Skip (s)"
+        if self.suggest_skip:
+            skip_label = "Skip (s) – suggested (already matches)"
+        skip_attr = self.colors.get("info", curses.A_DIM)
+        if self.selected == -1:
+            skip_attr = self.colors.get("skip", curses.A_BOLD)
+        self._addstr(stdscr, 5, 0, skip_label[:width], skip_attr)
+
         start_row = self._list_start_row(height)
         visible = max(1, (height - start_row - 3) // 2)
         end_index = min(len(self.results), self.top + visible)
@@ -531,7 +583,7 @@ class SearchTUI:
         for idx in range(self.top, end_index):
             result = self.results[idx]
             title_line, highlight = self._build_result_title(idx, result)
-            detail_line, detail_highlight = self._build_result_detail(result)
+            segments = self._build_result_detail(result)
             base_attr = self.colors.get("info", curses.A_NORMAL)
             highlight_attr = self.colors.get("year", curses.A_BOLD)
             secondary_attr = self.colors.get("url", curses.A_DIM)
@@ -540,23 +592,30 @@ class SearchTUI:
                 highlight_attr = base_attr | curses.A_BOLD
                 secondary_attr = base_attr | curses.A_DIM
             self._write_highlighted(stdscr, row, 0, title_line, highlight, base_attr, highlight_attr, width)
-            length_attr = self.colors.get("length", curses.A_BOLD)
-            if idx == self.selected:
-                length_attr = secondary_attr | curses.A_BOLD
-            self._write_highlighted(
-                stdscr,
-                row + 1,
-                4,
-                detail_line,
-                detail_highlight,
-                secondary_attr,
-                length_attr,
-                width - 4,
-            )
+            self._write_segments(stdscr, row + 1, 4, segments, width - 4, secondary_attr)
             row += 2
 
         instructions = "↑/↓ navigate • Enter accept • r refine • s skip • q abort"
         self._addstr(stdscr, height - 1, 0, instructions[:width], curses.A_DIM)
+
+    def _draw_progress_bar(self, window: "curses._CursesWindow", row: int, width: int) -> None:  # type: ignore[name-defined]
+        if width <= 0:
+            return
+        progress = self.context.get("progress") or {}
+        total = progress.get("total") or 0
+        counts = progress.get("counts") or {}
+        completed = sum(counts.values()) if isinstance(counts, dict) else 0
+        ratio = 0.0
+        if total:
+            ratio = max(0.0, min(completed / total, 1.0))
+        bar_width = max(10, width - 12)
+        filled = int(round(ratio * bar_width))
+        filled = min(filled, bar_width)
+        bar = "[" + "#" * filled + "-" * (bar_width - filled) + "]"
+        percent = f" {int(round(ratio * 100)):3d}%"
+        line = (bar + percent)[:width]
+        attr = self.colors.get("progress_bar", self.colors.get("progress", curses.A_BOLD))
+        self._addstr(window, row, 0, line, attr)
 
     def _build_progress_line(self) -> str:
         progress = self.context.get("progress") or {}
@@ -606,28 +665,43 @@ class SearchTUI:
             label += f" ({year})"
         return label, str(year) if year else None
 
-    def _build_result_detail(self, result: dict) -> Tuple[str, Optional[str]]:
-        details: List[str] = []
+    def _delta_attr(self, delta: int) -> int:
+        magnitude = abs(delta)
+        if magnitude <= 5:
+            return self.colors.get("delta_low", curses.A_BOLD)
+        if magnitude <= 15:
+            return self.colors.get("delta_medium", curses.A_BOLD)
+        return self.colors.get("delta_high", curses.A_BOLD)
+
+    def _build_result_detail(self, result: dict) -> List[Tuple[str, Optional[int]]]:
+        segments: List[Tuple[str, Optional[int]]] = []
+
+        def append_segment(text: str, attr: Optional[int]) -> None:
+            nonlocal segments
+            if not text:
+                return
+            if segments:
+                segments.append((" | ", None))
+            segments.append((text, attr))
+
         csfd_duration = result.get("duration_minutes")
         if csfd_duration:
-            details.append(f"CSFD {csfd_duration} min")
+            append_segment(f"CSFD {csfd_duration} min", self.colors.get("length"))
         else:
-            details.append("CSFD ?")
+            append_segment("CSFD ?", self.colors.get("length"))
         file_duration = self.context.get("file_duration")
         if file_duration:
-            details.append(f"File {file_duration} min")
+            append_segment(f"File {file_duration} min", None)
         delta = None
         if csfd_duration and file_duration:
             delta = file_duration - csfd_duration
         if delta is not None:
             sign = "+" if delta >= 0 else ""
-            details.append(f"Δ {sign}{delta} min")
+            append_segment(f"Δ {sign}{delta} min", self._delta_attr(delta))
         url = result.get("url")
         if url:
-            details.append(url)
-        text = " | ".join(details)
-        highlight = details[0] if details else None
-        return text, highlight
+            append_segment(url, self.colors.get("url"))
+        return segments
 
     def _addstr(self, window: "curses._CursesWindow", y: int, x: int, text: str, attr: int) -> None:  # type: ignore[name-defined]
         try:
@@ -659,6 +733,29 @@ class SearchTUI:
         self._addstr(window, y, x, before, base_attr)
         self._addstr(window, y, x + len(before), match, highlight_attr)
         self._addstr(window, y, x + len(before) + len(match), after, base_attr)
+
+    def _write_segments(
+        self,
+        window: "curses._CursesWindow",  # type: ignore[name-defined]
+        y: int,
+        x: int,
+        segments: List[Tuple[str, Optional[int]]],
+        width: int,
+        default_attr: int,
+    ) -> None:
+        if width <= 0:
+            return
+        cursor = x
+        max_x = x + max(0, width)
+        for text, attr in segments:
+            if not text:
+                continue
+            slice_len = max(0, min(len(text), max_x - cursor))
+            if slice_len <= 0:
+                break
+            segment_text = text[:slice_len]
+            self._addstr(window, y, cursor, segment_text, attr or default_attr)
+            cursor += slice_len
 
 
 def select_result_tui(
@@ -695,17 +792,49 @@ def interactive_select_title(
             pending_auto_choice = None
             continue
         enriched_results = enrich_csfd_results(results)
+        suggest_skip = bool(ctx.get("suggest_skip"))
+        if not suggest_skip and enriched_results:
+            first = enriched_results[0]
+            expected = format_media_name(first.get("title", ""), first.get("year"))
+            if expected:
+                file_path = ctx.get("file_path")
+                current_bases: List[str] = []
+                if isinstance(file_path, str) and file_path:
+                    file_base = sanitize_component(os.path.splitext(os.path.basename(file_path))[0])
+                    current_bases.append(file_base)
+                    parent = os.path.basename(os.path.dirname(file_path))
+                    current_bases.append(sanitize_component(parent))
+                display_name = ctx.get("display_name")
+                if isinstance(display_name, str) and display_name:
+                    current_bases.append(sanitize_component(display_name))
+                suggest_skip = any(base == expected for base in current_bases if base)
+        ctx["suggest_skip"] = suggest_skip
         ctx["current_query"] = current_query
         if pending_auto_choice is not None:
-            action, selection = select_result_simple(enriched_results, current_query, pending_auto_choice)
+            action, selection = select_result_simple(
+                enriched_results,
+                current_query,
+                pending_auto_choice,
+                suggest_skip=suggest_skip,
+            )
         else:
             if supports_curses():
                 try:
                     action, selection = select_result_tui(enriched_results, current_query, ctx)
                 except TUIError:
-                    action, selection = select_result_simple(enriched_results, current_query, None)
+                    action, selection = select_result_simple(
+                        enriched_results,
+                        current_query,
+                        None,
+                        suggest_skip=suggest_skip,
+                    )
             else:
-                action, selection = select_result_simple(enriched_results, current_query, None)
+                action, selection = select_result_simple(
+                    enriched_results,
+                    current_query,
+                    None,
+                    suggest_skip=suggest_skip,
+                )
         pending_auto_choice = None
         if action == "abort":
             raise UserAbort()
