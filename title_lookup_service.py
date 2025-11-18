@@ -4,10 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import curses
+import functools
 import gzip
+import json
 import os
 import random
 import re
+import shutil
+import subprocess
 import sys
 import textwrap
 import urllib.error
@@ -15,8 +20,7 @@ import urllib.parse
 import urllib.request
 import zlib
 from html.parser import HTMLParser
-from typing import Iterable, List, Optional, Sequence, Tuple
-
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 CSFD_SEARCH_URL = os.environ.get(
     "CSFD_SEARCH_URL",
     "https://www.csfd.cz/hledat/?q={query}",
@@ -51,6 +55,7 @@ SEPARATORS = re.compile(r"[._-]+")
 NON_ALNUM = re.compile(r"[^0-9a-zA-ZáéěíóúůýščřžÁÉĚÍÓÚŮÝŠČŘŽ ]+")
 WHITESPACE = re.compile(r"\s+")
 INVALID_FILENAME_CHARS = re.compile(r'[\\/<>:"|?*]')
+RUNTIME_PATTERN = re.compile(r"(\d{1,3})\s*(?:min|min\.|minut|minuty|minutes)", re.IGNORECASE)
 VIDEO_EXTENSIONS = {
     ".mkv",
     ".mp4",
@@ -64,9 +69,15 @@ VIDEO_EXTENSIONS = {
     ".iso",
 }
 
+FFPROBE_WARNING_SHOWN = False
+
 
 class UserAbort(Exception):
     """Raised when the user aborts the interactive workflow."""
+
+
+class TUIError(Exception):
+    """Raised when the interactive TUI cannot be displayed."""
 
 
 
@@ -209,7 +220,9 @@ def format_result(idx: int, result: dict) -> str:
     year = result.get("year")
     url = result.get("url", "")
     suffix = f" ({year})" if year else ""
-    return f"  {idx}. {title}{suffix}\n      {url}"
+    duration = result.get("duration_minutes")
+    duration_text = f" [{duration} min]" if duration else ""
+    return f"  {idx}. {title}{suffix}{duration_text}\n      {url}"
 
 
 def prompt(prompt_text: str) -> str:
@@ -219,7 +232,125 @@ def prompt(prompt_text: str) -> str:
         return ""
 
 
-def select_result(results: Sequence[dict], query: str, auto_choice: Optional[int]) -> Tuple[str, Optional[dict]]:
+def supports_curses() -> bool:
+    term = os.environ.get("TERM", "")
+    return sys.stdin.isatty() and sys.stdout.isatty() and term and term.lower() != "dumb"
+
+
+def parse_runtime(html: str) -> Optional[int]:
+    match = RUNTIME_PATTERN.search(html)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+@functools.lru_cache(maxsize=256)
+def fetch_csfd_detail(url: str) -> Dict[str, Optional[int]]:
+    if not url:
+        return {}
+    absolute_url = urllib.parse.urljoin("https://www.csfd.cz", url)
+    request = urllib.request.Request(absolute_url, headers=build_headers())
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read()
+            encoding = response.headers.get("Content-Encoding", "").lower()
+            try:
+                if "gzip" in encoding:
+                    payload = gzip.decompress(raw).decode("utf-8", errors="ignore")
+                elif "deflate" in encoding:
+                    payload = zlib.decompress(raw).decode("utf-8", errors="ignore")
+                else:
+                    payload = raw.decode("utf-8", errors="ignore")
+            except (OSError, zlib.error, UnicodeDecodeError):
+                return {}
+    except urllib.error.URLError:
+        return {}
+    duration = parse_runtime(payload)
+    return {"duration_minutes": duration}
+
+
+def enrich_csfd_results(results: Sequence[dict]) -> List[dict]:
+    enriched: List[dict] = []
+    for item in results:
+        enriched_item = dict(item)
+        detail = fetch_csfd_detail(enriched_item.get("url", ""))
+        if detail:
+            enriched_item["duration_minutes"] = detail.get("duration_minutes")
+        else:
+            enriched_item.setdefault("duration_minutes", None)
+        enriched.append(enriched_item)
+    return enriched
+
+
+def get_media_duration(file_path: str) -> Optional[int]:
+    global FFPROBE_WARNING_SHOWN
+    if not os.path.exists(file_path):
+        return None
+    ffprobe = os.environ.get("FFPROBE_PATH") or shutil.which("ffprobe")
+    if not ffprobe:
+        if not FFPROBE_WARNING_SHOWN:
+            print(
+                "Warning: ffprobe not found; install FFmpeg to enable media length detection.",
+                file=sys.stderr,
+            )
+            FFPROBE_WARNING_SHOWN = True
+        return None
+    cmd = [
+        ffprobe,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration:stream=duration",
+        "-of",
+        "json",
+        file_path,
+    ]
+    try:
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+    except (OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+    def _parse_duration(value: object) -> Optional[float]:
+        if value in (None, "", "N/A"):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    durations: List[float] = []
+    fmt = data.get("format") if isinstance(data, dict) else None
+    if isinstance(fmt, dict):
+        parsed = _parse_duration(fmt.get("duration"))
+        if parsed and parsed > 0:
+            durations.append(parsed)
+    streams = data.get("streams") if isinstance(data, dict) else None
+    if isinstance(streams, list):
+        for stream in streams:
+            if isinstance(stream, dict):
+                parsed = _parse_duration(stream.get("duration"))
+                if parsed and parsed > 0:
+                    durations.append(parsed)
+    if not durations:
+        return None
+    seconds = max(durations)
+    if seconds <= 0:
+        return None
+    minutes = int(round(seconds / 60))
+    return minutes if minutes > 0 else None
+
+
+def select_result_simple(results: Sequence[dict], query: str, auto_choice: Optional[int]) -> Tuple[str, Optional[dict]]:
     if not results:
         return ("skip", None)
     if auto_choice is not None:
@@ -251,12 +382,307 @@ def select_result(results: Sequence[dict], query: str, auto_choice: Optional[int
         print("Invalid choice, please try again.")
 
 
+class SearchTUI:
+    def __init__(self, query: str, results: Sequence[dict], context: Optional[dict] = None):
+        self.query = query
+        self.results = list(results)
+        self.context = context or {}
+        self.selected = 0
+        self.top = 0
+        self.outcome: Tuple[str, Optional[dict]] = ("skip", None)
+        self.colors: Dict[str, int] = {}
+
+    def run(self) -> Tuple[str, Optional[dict]]:
+        try:
+            curses.wrapper(self._main)
+        except Exception as exc:  # noqa: BLE001 - convert to TUIError for graceful fallback
+            raise TUIError(str(exc)) from exc
+        return self.outcome
+
+    def _main(self, stdscr: "curses._CursesWindow") -> None:  # type: ignore[name-defined]
+        curses.curs_set(0)
+        if curses.has_colors():
+            curses.start_color()
+            curses.use_default_colors()
+        self._init_colors()
+        while True:
+            height, width = stdscr.getmaxyx()
+            stdscr.erase()
+            if height < 12 or width < 60:
+                msg = "Terminal too small. Resize or press q to abort."
+                self._addstr(stdscr, max(0, height // 2), max(0, (width - len(msg)) // 2), msg, curses.A_BOLD)
+                key = stdscr.getch()
+                if key in (ord("q"), ord("Q"), 27):
+                    self.outcome = ("abort", None)
+                    break
+                continue
+            self._draw(stdscr, height, width)
+            key = stdscr.getch()
+            if key in (curses.KEY_UP, ord("k")):
+                self._move_selection(-1)
+            elif key in (curses.KEY_DOWN, ord("j")):
+                self._move_selection(1)
+            elif key in (curses.KEY_PPAGE, ord("b")):
+                self._move_selection(-5)
+            elif key in (curses.KEY_NPAGE, ord("f")):
+                self._move_selection(5)
+            elif key == curses.KEY_HOME:
+                self.selected = 0
+            elif key == curses.KEY_END:
+                self.selected = len(self.results) - 1
+            elif key in (10, 13, curses.KEY_ENTER):
+                self.outcome = ("accept", self.results[self.selected])
+                break
+            elif key in (ord("r"), ord("R")):
+                self.outcome = ("refine", None)
+                break
+            elif key in (ord("s"), ord("S")):
+                self.outcome = ("skip", None)
+                break
+            elif key in (ord("q"), ord("Q"), 27):
+                self.outcome = ("abort", None)
+                break
+
+    def _init_colors(self) -> None:
+        if not curses.has_colors():
+            self.colors = {
+                "selected": curses.A_REVERSE | curses.A_BOLD,
+                "progress": curses.A_BOLD,
+                "info": curses.A_DIM,
+                "year": curses.A_BOLD,
+                "url": curses.A_DIM,
+                "length": curses.A_BOLD,
+            }
+            return
+        curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        curses.init_pair(2, curses.COLOR_CYAN, -1)
+        curses.init_pair(3, curses.COLOR_GREEN, -1)
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)
+        curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+        curses.init_pair(6, curses.COLOR_WHITE, -1)
+        self.colors = {
+            "selected": curses.color_pair(1) | curses.A_BOLD,
+            "progress": curses.color_pair(2) | curses.A_BOLD,
+            "info": curses.color_pair(3),
+            "year": curses.color_pair(4) | curses.A_BOLD,
+            "url": curses.color_pair(5) | curses.A_DIM,
+            "length": curses.color_pair(6) | curses.A_BOLD,
+        }
+
+    def _move_selection(self, delta: int) -> None:
+        if not self.results:
+            return
+        self.selected = max(0, min(self.selected + delta, len(self.results) - 1))
+        if self.selected < self.top:
+            self.top = self.selected
+        visible = max(1, self._visible_items())
+        if self.selected >= self.top + visible:
+            self.top = self.selected - visible + 1
+
+    def _visible_items(self) -> int:
+        height = self.context.get("_cached_height")
+        if height is None:
+            return 5
+        start_row = self._list_start_row(height)
+        available = height - start_row - 2
+        return max(1, available // 2)
+
+    def _list_start_row(self, height: int) -> int:
+        return 6
+
+    def _draw(self, stdscr: "curses._CursesWindow", height: int, width: int) -> None:  # type: ignore[name-defined]
+        self.context["_cached_height"] = height
+        progress_line = self._build_progress_line()
+        self._addstr(stdscr, 0, 0, progress_line.ljust(width), self.colors.get("progress", curses.A_BOLD))
+
+        file_line, query_line, duration_line = self._build_header_lines(width)
+        self._write_highlighted(
+            stdscr,
+            2,
+            0,
+            file_line[0],
+            file_line[1],
+            self.colors.get("info", curses.A_NORMAL) | curses.A_BOLD,
+            self.colors.get("year", curses.A_BOLD),
+            width,
+        )
+        self._write_highlighted(
+            stdscr,
+            3,
+            0,
+            query_line[0],
+            query_line[1],
+            self.colors.get("info", curses.A_NORMAL),
+            self.colors.get("year", curses.A_BOLD),
+            width,
+        )
+        self._addstr(
+            stdscr,
+            4,
+            0,
+            duration_line[:width],
+            self.colors.get("info", curses.A_DIM),
+        )
+
+        start_row = self._list_start_row(height)
+        visible = max(1, (height - start_row - 3) // 2)
+        end_index = min(len(self.results), self.top + visible)
+        row = start_row
+        for idx in range(self.top, end_index):
+            result = self.results[idx]
+            title_line, highlight = self._build_result_title(idx, result)
+            detail_line, detail_highlight = self._build_result_detail(result)
+            base_attr = self.colors.get("info", curses.A_NORMAL)
+            highlight_attr = self.colors.get("year", curses.A_BOLD)
+            secondary_attr = self.colors.get("url", curses.A_DIM)
+            if idx == self.selected:
+                base_attr = self.colors.get("selected", curses.A_REVERSE | curses.A_BOLD)
+                highlight_attr = base_attr | curses.A_BOLD
+                secondary_attr = base_attr | curses.A_DIM
+            self._write_highlighted(stdscr, row, 0, title_line, highlight, base_attr, highlight_attr, width)
+            length_attr = self.colors.get("length", curses.A_BOLD)
+            if idx == self.selected:
+                length_attr = secondary_attr | curses.A_BOLD
+            self._write_highlighted(
+                stdscr,
+                row + 1,
+                4,
+                detail_line,
+                detail_highlight,
+                secondary_attr,
+                length_attr,
+                width - 4,
+            )
+            row += 2
+
+        instructions = "↑/↓ navigate • Enter accept • r refine • s skip • q abort"
+        self._addstr(stdscr, height - 1, 0, instructions[:width], curses.A_DIM)
+
+    def _build_progress_line(self) -> str:
+        progress = self.context.get("progress") or {}
+        total = progress.get("total")
+        current = progress.get("current_index")
+        counts = progress.get("counts") or {}
+        processed = sum(counts.values())
+        parts: List[str] = []
+        if total:
+            current_part = f"Processing {current or processed + 1}/{total}"
+            parts.append(current_part)
+            parts.append(f"Done {processed}")
+            remaining = max(0, total - processed)
+            parts.append(f"Remaining {remaining}")
+        else:
+            parts.append("Processing library")
+        breakdown = ", ".join(f"{name}:{counts.get(name, 0)}" for name in ("renamed", "unchanged", "skipped") if counts.get(name))
+        if breakdown:
+            parts.append(breakdown)
+        return " | ".join(parts)
+
+    def _build_header_lines(self, width: int) -> Tuple[Tuple[str, Optional[str]], Tuple[str, Optional[str]], str]:
+        file_name = self.context.get("file_name")
+        file_path = self.context.get("file_path")
+        if not file_name and file_path:
+            file_name = os.path.basename(file_path)
+        if not file_name:
+            file_name = self.context.get("display_name") or "Current item"
+        year_hint = self.context.get("year_hint")
+        file_line = (f"File: {file_name}", str(year_hint) if year_hint else None)
+        query = self.query or self.context.get("derived_query") or ""
+        query_line = (f"Query: {query}", str(year_hint) if year_hint else None)
+        file_duration = self.context.get("file_duration")
+        duration_parts: List[str] = []
+        if file_duration:
+            duration_parts.append(f"File length {file_duration} min")
+        else:
+            duration_parts.append("File length unknown")
+        duration_line = " | ".join(duration_parts)
+        return file_line, query_line, duration_line
+
+    def _build_result_title(self, idx: int, result: dict) -> Tuple[str, Optional[str]]:
+        year = result.get("year")
+        title = result.get("title", "(no title)")
+        label = f"{idx + 1:>2}. {title}"
+        if year:
+            label += f" ({year})"
+        return label, str(year) if year else None
+
+    def _build_result_detail(self, result: dict) -> Tuple[str, Optional[str]]:
+        details: List[str] = []
+        csfd_duration = result.get("duration_minutes")
+        if csfd_duration:
+            details.append(f"CSFD {csfd_duration} min")
+        else:
+            details.append("CSFD ?")
+        file_duration = self.context.get("file_duration")
+        if file_duration:
+            details.append(f"File {file_duration} min")
+        delta = None
+        if csfd_duration and file_duration:
+            delta = file_duration - csfd_duration
+        if delta is not None:
+            sign = "+" if delta >= 0 else ""
+            details.append(f"Δ {sign}{delta} min")
+        url = result.get("url")
+        if url:
+            details.append(url)
+        text = " | ".join(details)
+        highlight = details[0] if details else None
+        return text, highlight
+
+    def _addstr(self, window: "curses._CursesWindow", y: int, x: int, text: str, attr: int) -> None:  # type: ignore[name-defined]
+        try:
+            window.addnstr(y, x, text, max(0, window.getmaxyx()[1] - x), attr)
+        except curses.error:
+            pass
+
+    def _write_highlighted(
+        self,
+        window: "curses._CursesWindow",  # type: ignore[name-defined]
+        y: int,
+        x: int,
+        text: str,
+        highlight: Optional[str],
+        base_attr: int,
+        highlight_attr: int,
+        width: int,
+    ) -> None:
+        if width <= 0:
+            return
+        segment = text[: max(0, width - x)]
+        if not highlight or highlight not in segment:
+            self._addstr(window, y, x, segment, base_attr)
+            return
+        idx = segment.find(highlight)
+        before = segment[:idx]
+        match = segment[idx : idx + len(highlight)]
+        after = segment[idx + len(highlight) :]
+        self._addstr(window, y, x, before, base_attr)
+        self._addstr(window, y, x + len(before), match, highlight_attr)
+        self._addstr(window, y, x + len(before) + len(match), after, base_attr)
+
+
+def select_result_tui(
+    results: Sequence[dict],
+    query: str,
+    context: Optional[dict] = None,
+) -> Tuple[str, Optional[dict]]:
+    if not results:
+        return ("skip", None)
+    tui = SearchTUI(query, results, context)
+    return tui.run()
+
+
 def interactive_select_title(
     query: str,
     max_results: int,
     auto_choice: Optional[int],
     year_hint: Optional[int],
+    context: Optional[dict] = None,
 ) -> Optional[dict]:
+    ctx = dict(context or {})
+    if year_hint and "year_hint" not in ctx:
+        ctx["year_hint"] = year_hint
+    ctx.setdefault("derived_query", query)
     current_query = query
     pending_auto_choice = auto_choice
     while True:
@@ -268,7 +694,18 @@ def interactive_select_title(
                 return None
             pending_auto_choice = None
             continue
-        action, selection = select_result(results, current_query, pending_auto_choice)
+        enriched_results = enrich_csfd_results(results)
+        ctx["current_query"] = current_query
+        if pending_auto_choice is not None:
+            action, selection = select_result_simple(enriched_results, current_query, pending_auto_choice)
+        else:
+            if supports_curses():
+                try:
+                    action, selection = select_result_tui(enriched_results, current_query, ctx)
+                except TUIError:
+                    action, selection = select_result_simple(enriched_results, current_query, None)
+            else:
+                action, selection = select_result_simple(enriched_results, current_query, None)
         pending_auto_choice = None
         if action == "abort":
             raise UserAbort()
@@ -406,6 +843,7 @@ def process_media_file(
     file_path: str,
     root_path: str,
     args: argparse.Namespace,
+    progress: Optional[dict] = None,
 ) -> Tuple[str, str, Optional[Tuple[str, str]]]:
     if not os.path.exists(file_path):
         print(f"Missing file, skipping: {file_path}", file=sys.stderr)
@@ -418,8 +856,39 @@ def process_media_file(
     year_hint = find_year_hint(os.path.basename(file_path), os.path.basename(os.path.dirname(file_path)))
     if not year_hint and args.year:
         year_hint = args.year
+    file_duration = get_media_duration(file_path)
+    context = {
+        "file_path": file_path,
+        "file_name": os.path.basename(file_path),
+        "file_duration": file_duration,
+        "year_hint": year_hint,
+        "progress": progress or {},
+        "derived_query": query,
+    }
+    if progress and not supports_curses():
+        total = progress.get("total")
+        counts = progress.get("counts", {})
+        processed = sum(counts.values())
+        remaining = (total - processed) if total else None
+        current_index = progress.get("current_index")
+        summary_parts = [
+            f"Progress: processing {current_index or processed + 1}/{total}" if total else "Progress: processing items",
+            f"done {processed}",
+        ]
+        if remaining is not None:
+            summary_parts.append(f"remaining {remaining}")
+        breakdown = ", ".join(f"{name}={counts.get(name, 0)}" for name in ("renamed", "unchanged", "skipped"))
+        if breakdown:
+            summary_parts.append(breakdown)
+        print("  " + " | ".join(summary_parts))
     try:
-        selection = interactive_select_title(query, args.max_results, args.auto_choice, year_hint)
+        selection = interactive_select_title(
+            query,
+            args.max_results,
+            args.auto_choice,
+            year_hint,
+            context=context,
+        )
     except UserAbort:
         raise
     if not selection:
@@ -460,7 +929,13 @@ def process_library_path(args: argparse.Namespace) -> int:
             print(f"No supported video files under: {root_path}", file=sys.stderr)
             return 1
         try:
-            outcome, _, _ = process_media_file(root_path, os.path.dirname(root_path), args)
+            progress_info = {"current_index": 1, "total": 1, "counts": {}}
+            outcome, _, _ = process_media_file(
+                root_path,
+                os.path.dirname(root_path),
+                args,
+                progress=progress_info,
+            )
         except UserAbort:
             print("Aborted by user.", file=sys.stderr)
             return 1
@@ -474,7 +949,17 @@ def process_library_path(args: argparse.Namespace) -> int:
     try:
         for idx in range(len(files)):
             mapped_path = remap_path(files[idx], dir_mapping)
-            outcome, new_file_path, dir_change = process_media_file(mapped_path, root_path, args)
+            progress_info = {
+                "current_index": idx + 1,
+                "total": len(files),
+                "counts": dict(stats),
+            }
+            outcome, new_file_path, dir_change = process_media_file(
+                mapped_path,
+                root_path,
+                args,
+                progress=progress_info,
+            )
             stats[outcome] = stats.get(outcome, 0) + 1
             files[idx] = new_file_path
             if dir_change:
@@ -497,8 +982,22 @@ def interactive_lookup(args: argparse.Namespace) -> int:
     if not query:
         print("Unable to derive a CSFD query from the provided filename.", file=sys.stderr)
         return 1
+    context = {
+        "display_name": args.filename or args.query or query,
+        "year_hint": args.year,
+        "progress": {"current_index": 1, "total": 1, "counts": {}},
+        "derived_query": query,
+    }
+    if args.filename and os.path.exists(args.filename):
+        context.update(
+            {
+                "file_path": args.filename,
+                "file_name": os.path.basename(args.filename),
+                "file_duration": get_media_duration(args.filename),
+            }
+        )
     try:
-        selection = interactive_select_title(query, args.max_results, args.auto_choice, args.year)
+        selection = interactive_select_title(query, args.max_results, args.auto_choice, args.year, context=context)
     except UserAbort:
         return 1
     if not selection:

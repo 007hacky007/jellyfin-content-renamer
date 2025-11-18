@@ -4,6 +4,7 @@ import tempfile
 from title_lookup_service import (
     find_year_hint,
     format_media_name,
+    parse_runtime,
     guess_search_query,
     remap_path,
     rename_media_paths,
@@ -34,6 +35,11 @@ def test_remap_path_prefers_longest_match() -> None:
         "/a/b/d": "/a/c/e",
     }
     assert remap_path("/a/b/d/file.mkv", mapping) == "/a/c/e/file.mkv"
+
+
+def test_parse_runtime_extracts_minutes() -> None:
+    html = "<div class='runtime'>Délka: 142 min</div>"
+    assert parse_runtime(html) == 142
 
 
 def test_rename_media_paths_updates_file_and_directory() -> None:
