@@ -1,0 +1,129 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-wheel-metadata/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+*.pid
+*.log
+test-results/
+pytestdebug.log
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask
+instance/
+.webassets-cache
+
+# Scrapy
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# Environments
+.env
+.env.*
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+.pythonenv/
+.virtualenv/
+
+# PEP 582 / Package management
+__pypackages__/
+
+# Poetry
+.poetry/
+# (Keep poetry.lock if desired)
+
+# PDM
+.pdm.toml
+.pdm-python
+
+# Hatch
+.hatch/
+
+# Ruff / Lint
+.ruff_cache/
+
+# Mypy / Type checking
+.mypy_cache/
+.pyre/
+.pytype/
+
+# Static analysis
+.bandit/
+
+# Cython build
+cython_debug/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Logs / Temp
+*.tmp
+*.swp
+*.swo
+
+# Cache
+.cache/
+.python-version
+
+# Profiling
+.prof
