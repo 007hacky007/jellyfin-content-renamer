@@ -774,9 +774,10 @@ def interactive_select_title(
     max_results: int,
     auto_choice: Optional[int],
     year_hint: Optional[int],
+    auto_skip_matches: bool = False,
     context: Optional[dict] = None,
 ) -> Optional[dict]:
-    ctx = dict(context or {})
+    ctx = context if context is not None else {}
     if year_hint and "year_hint" not in ctx:
         ctx["year_hint"] = year_hint
     ctx.setdefault("derived_query", query)
@@ -810,6 +811,9 @@ def interactive_select_title(
                 suggest_skip = any(base == expected for base in current_bases if base)
         ctx["suggest_skip"] = suggest_skip
         ctx["current_query"] = current_query
+        if suggest_skip and auto_skip_matches and pending_auto_choice is None:
+            ctx["auto_skipped"] = True
+            return None
         if pending_auto_choice is not None:
             action, selection = select_result_simple(
                 enriched_results,
@@ -1016,10 +1020,14 @@ def process_media_file(
             args.max_results,
             args.auto_choice,
             year_hint,
+            auto_skip_matches=args.auto_skip_matches,
             context=context,
         )
     except UserAbort:
         raise
+    if context.get("auto_skipped"):
+        print("  Auto-skipped: existing name already matches CSFD.")
+        return ("skipped", file_path, None)
     if not selection:
         print("  Skipped.")
         return ("skipped", file_path, None)
@@ -1126,9 +1134,19 @@ def interactive_lookup(args: argparse.Namespace) -> int:
             }
         )
     try:
-        selection = interactive_select_title(query, args.max_results, args.auto_choice, args.year, context=context)
+        selection = interactive_select_title(
+            query,
+            args.max_results,
+            args.auto_choice,
+            args.year,
+            auto_skip_matches=args.auto_skip_matches,
+            context=context,
+        )
     except UserAbort:
         return 1
+    if context.get("auto_skipped"):
+        print("Auto-skipped: existing name already matches CSFD.")
+        return 0
     if not selection:
         return 1
     title = selection["title"]
@@ -1156,6 +1174,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--auto-choice",
         type=int,
         help="Pick a specific result automatically (useful for automated tests)",
+    )
+    parser.add_argument(
+        "--auto-skip-matches",
+        action="store_true",
+        help="Automatically skip items whose current name already matches the top CSFD hit",
     )
     args = parser.parse_args(argv)
     if args.path:

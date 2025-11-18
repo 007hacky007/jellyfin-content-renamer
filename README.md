@@ -12,3 +12,4 @@
 - Recursive scan with Jellyfin-safe folder/file naming.
 - ČSFD search with interactive selection, progress bar, and duration deltas.
 - Optional skip suggestions when names already match metadata.
+- `--auto-skip-matches` flag to bypass items that already align with CSFD results.
