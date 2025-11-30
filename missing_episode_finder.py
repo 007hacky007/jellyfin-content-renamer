@@ -697,8 +697,8 @@ def display_progress(show_idx: int, total: int, report: ShowReport) -> None:
         print(f"  Missing full seasons: {formatted_seasons}")
 
 
-def summarize_results(reports: Sequence[ShowReport]) -> None:
-    print("\nMissing episodes summary:")
+def summarize_results(reports: Sequence[ShowReport], heading: str = "Missing episodes summary") -> None:
+    print(f"\n{heading}:")
     any_missing = False
     for report in reports:
         missing = report.missing_summary()
@@ -715,6 +715,13 @@ def summarize_results(reports: Sequence[ShowReport]) -> None:
             print(f"    Season {season:02d}: {formatted}")
     if not any_missing:
         print("All processed seasons appear complete (no gaps detected).")
+
+
+def print_progress_summary(reports: Sequence[ShowReport], processed: int, total: int) -> None:
+    if not reports or processed >= total:
+        return
+    heading = f"Progress summary ({processed}/{total} shows)"
+    summarize_results(reports, heading=heading)
 
 
 def build_csfd_lookup(args: argparse.Namespace) -> Optional[CSFDLookup]:
@@ -766,12 +773,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         shows_to_process = shows
     reports: List[ShowReport] = []
     total = len(shows_to_process)
-    for idx, (show_name, show_path) in enumerate(shows_to_process, start=1):
-        csfd_metadata = csfd_lookup.resolve(show_name) if csfd_lookup else None
-        report = analyze_show(show_name, show_path, metadata=csfd_metadata)
-        display_progress(idx, total, report)
-        reports.append(report)
-    summarize_results(reports)
+    try:
+        for idx, (show_name, show_path) in enumerate(shows_to_process, start=1):
+            csfd_metadata = csfd_lookup.resolve(show_name) if csfd_lookup else None
+            report = analyze_show(show_name, show_path, metadata=csfd_metadata)
+            display_progress(idx, total, report)
+            reports.append(report)
+            print_progress_summary(reports, idx, total)
+    except KeyboardInterrupt:
+        print("\nInterrupted by user; displaying collected results so far...")
+    finally:
+        if reports:
+            summarize_results(reports)
     return 0
 
 
