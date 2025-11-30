@@ -236,8 +236,11 @@ class CSFDLookup:
         query = derive_show_search_query(display_name)
         if not query:
             return None
-        results = fetch_csfd_results(query, self.max_results)
+        fetch_limit = max(self.max_results, self.max_results * 3)
+        results = fetch_csfd_results(query, fetch_limit)
         candidates = self._build_candidates(results)
+        if len(candidates) > self.max_results:
+            candidates = candidates[: self.max_results]
         if not candidates:
             print(f"No CSFD matches for '{display_name}'.", file=sys.stderr)
             return None
@@ -263,9 +266,8 @@ class CSFDLookup:
             if not detail:
                 continue
             media_type = (detail.get("media_type") or "").lower()
-            if "seri" not in media_type and media_type:
-                # Prefer serials but still include others if type unknown.
-                pass
+            if media_type and "seri" not in media_type:
+                continue
             year = entry.get("year") if isinstance(entry.get("year"), int) else None
             built.append(
                 CSFDShowCandidate(

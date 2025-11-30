@@ -92,3 +92,27 @@ def test_csfd_lookup_skips_filmy_placeholder() -> None:
         result = lookup.resolve("Kancl")
     assert result is not None
     assert result.title == "Kancl"
+
+
+def test_csfd_lookup_prefers_series_even_if_films_first() -> None:
+    entries = [
+        {"title": "Černá kniha", "year": 2006, "url": "/film/1-cerna-kniha/"},
+        {"title": "Malá černá skříňka", "year": 2004, "url": "/film/2-mala-cerna-skrinka/"},
+        {"title": "Black Books", "year": 2000, "url": "/film/3-black-books/"},
+    ]
+    details = {
+        "/film/1-cerna-kniha/": {"media_type": "Film", "origins": ["Nizozemsko"], "original_title": "Zwartboek"},
+        "/film/2-mala-cerna-skrinka/": {"media_type": "Film", "origins": ["USA"], "original_title": "Little Black Book"},
+        "/film/3-black-books/": {"media_type": "Seriál", "origins": ["Velká Británie"], "original_title": "Black Books"},
+    }
+
+    with patch("missing_episode_finder.fetch_csfd_results", return_value=entries), patch(
+        "missing_episode_finder.fetch_csfd_show_detail",
+        side_effect=lambda url: details[url],
+    ) as mock_detail:
+        lookup = CSFDLookup(max_results=1)
+        result = lookup.resolve("Black Books")
+
+    assert mock_detail.call_count == 3
+    assert result is not None
+    assert result.title == "Black Books"
