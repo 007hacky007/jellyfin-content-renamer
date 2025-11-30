@@ -251,6 +251,11 @@ class CSFDLookup:
     def _build_candidates(self, entries: Sequence[dict]) -> List[CSFDShowCandidate]:
         built: List[CSFDShowCandidate] = []
         for entry in entries:
+            title = str(entry.get("title") or "").strip()
+            if not title:
+                continue
+            if title.casefold() == "filmy".casefold():
+                continue
             url = entry.get("url")
             if not isinstance(url, str) or not url:
                 continue
@@ -261,9 +266,6 @@ class CSFDLookup:
             if "seri" not in media_type and media_type:
                 # Prefer serials but still include others if type unknown.
                 pass
-            title = str(entry.get("title") or "").strip()
-            if not title:
-                continue
             year = entry.get("year") if isinstance(entry.get("year"), int) else None
             built.append(
                 CSFDShowCandidate(

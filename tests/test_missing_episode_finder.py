@@ -72,3 +72,23 @@ def test_csfd_lookup_uses_custom_choice_and_details() -> None:
     assert result is not None
     assert result.origins == ["Česko"]
     assert result.original_title == "Kancl (CZ)"
+
+
+def test_csfd_lookup_skips_filmy_placeholder() -> None:
+    entries = [
+        {"title": "Filmy", "year": None, "url": "/film/0-filmy/"},
+        {"title": "Kancl", "year": 2005, "url": "/film/101-kancl/"},
+    ]
+
+    def detail_lookup(url: str) -> dict:
+        assert url != "/film/0-filmy/"
+        return {"original_title": "The Office", "origins": ["USA"], "media_type": "seriál"}
+
+    with patch("missing_episode_finder.fetch_csfd_results", return_value=entries), patch(
+        "missing_episode_finder.fetch_csfd_show_detail",
+        side_effect=detail_lookup,
+    ):
+        lookup = CSFDLookup(max_results=5)
+        result = lookup.resolve("Kancl")
+    assert result is not None
+    assert result.title == "Kancl"
