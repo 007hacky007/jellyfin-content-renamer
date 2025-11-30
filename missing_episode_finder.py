@@ -282,6 +282,16 @@ class CSFDLookup:
         return built
 
 
+def format_csfd_display_name(candidate: CSFDShowCandidate) -> str:
+    local_title = candidate.title.strip()
+    original = (candidate.original_title or "").strip()
+    show_original = original and original.casefold() != local_title.casefold()
+    year = candidate.year or "?"
+    if show_original:
+        return f"{local_title} / {original} ({year})"
+    return f"{local_title} ({year})"
+
+
 def is_video_file(name: str) -> bool:
     _, ext = os.path.splitext(name)
     return ext.lower() in VIDEO_EXTENSIONS
@@ -328,9 +338,8 @@ def prompt_csfd_selection_cli(show_name: str, candidates: Sequence[CSFDShowCandi
     print(f"CSFD offers multiple matches for '{show_name}':")
     for idx, candidate in enumerate(candidates, start=1):
         origins = ", ".join(candidate.origins) if candidate.origins else "Unknown origin"
-        original = candidate.original_title or "Unknown original title"
-        year = candidate.year or "?"
-        print(f"  {idx}. {candidate.title} ({year}) | {origins} | Original: {original}")
+        display = format_csfd_display_name(candidate)
+        print(f"  {idx}. {display} | {origins}")
     print("Press Enter to accept #1, or type the desired number. Type 'q' to skip.")
     while True:
         choice = input("Selection> ").strip().lower()
@@ -376,7 +385,7 @@ class CSFDShowSelectionTUI:
             for idx in range(top, min(len(self.candidates), top + visible_rows)):
                 candidate = self.candidates[idx]
                 prefix = "> " if idx == self.selected else "  "
-                line = f"{prefix}{candidate.title} ({candidate.year or '?'})"
+                line = f"{prefix}{format_csfd_display_name(candidate)}"
                 attr = curses.A_REVERSE | curses.A_BOLD if idx == self.selected else curses.A_NORMAL
                 try:
                     stdscr.addnstr(row, 0, line[:width], width, attr)
@@ -403,8 +412,7 @@ class CSFDShowSelectionTUI:
 
     def _format_details(self, candidate: CSFDShowCandidate) -> str:
         origins = ", ".join(candidate.origins) if candidate.origins else "Unknown origin"
-        original = candidate.original_title or "Unknown original title"
-        return f"{origins} | Original: {original}"
+        return origins
 
 
 class ShowSelectionTUI:

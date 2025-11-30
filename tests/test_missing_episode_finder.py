@@ -2,7 +2,13 @@ import os
 import tempfile
 from unittest.mock import patch
 
-from missing_episode_finder import CSFDLookup, analyze_show, derive_show_search_query
+from missing_episode_finder import (
+    CSFDLookup,
+    CSFDShowCandidate,
+    analyze_show,
+    derive_show_search_query,
+    format_csfd_display_name,
+)
 
 
 def _touch(path: str) -> None:
@@ -116,3 +122,27 @@ def test_csfd_lookup_prefers_series_even_if_films_first() -> None:
     assert mock_detail.call_count == 3
     assert result is not None
     assert result.title == "Black Books"
+
+
+def test_format_csfd_display_name_shows_both_titles_when_different() -> None:
+    candidate = CSFDShowCandidate(
+        id=1,
+        title="Kancl",
+        year=2005,
+        original_title="The Office",
+        origins=["USA"],
+        url="https://example.com",
+    )
+    assert format_csfd_display_name(candidate) == "Kancl / The Office (2005)"
+
+
+def test_format_csfd_display_name_omits_duplicate_original() -> None:
+    candidate = CSFDShowCandidate(
+        id=2,
+        title="Kancl",
+        year=None,
+        original_title="Kancl",
+        origins=[],
+        url="https://example.com",
+    )
+    assert format_csfd_display_name(candidate) == "Kancl (?)"
