@@ -46,6 +46,7 @@ class ShowReport:
     name: str
     path: str
     seasons: Dict[int, SeasonReport] = field(default_factory=dict)
+    missing_seasons: List[int] = field(default_factory=list)
 
     def missing_summary(self) -> List[Tuple[int, List[int]]]:
         return [
@@ -227,7 +228,15 @@ def analyze_show(show_name: str, show_path: str) -> ShowReport:
         if episodes:
             max_episode = episodes[-1]
             report.missing_episodes = [num for num in range(1, max_episode + 1) if num not in episodes]
-    return ShowReport(name=show_name, path=show_path, seasons=seasons)
+    season_numbers = sorted(num for num in seasons if num > 0)
+    missing_seasons: List[int] = []
+    if season_numbers:
+        max_season = season_numbers[-1]
+        present = set(season_numbers)
+        for season_number in range(1, max_season + 1):
+            if season_number not in present:
+                missing_seasons.append(season_number)
+    return ShowReport(name=show_name, path=show_path, seasons=seasons, missing_seasons=missing_seasons)
 
 
 def format_episode(tag_season: int, episode: int) -> str:
@@ -251,6 +260,9 @@ def display_progress(show_idx: int, total: int, report: ShowReport) -> None:
             print(f"  Season {season_number:02d}: missing {formatted_missing}")
         else:
             print(f"  Season {season_number:02d}: complete (1-{season_report.episodes_present[-1]:02d})")
+    if report.missing_seasons:
+        formatted_seasons = ", ".join(f"S{season:02d}" for season in report.missing_seasons)
+        print(f"  Missing full seasons: {formatted_seasons}")
 
 
 def summarize_results(reports: Sequence[ShowReport]) -> None:
@@ -258,10 +270,14 @@ def summarize_results(reports: Sequence[ShowReport]) -> None:
     any_missing = False
     for report in reports:
         missing = report.missing_summary()
-        if not missing:
+        has_missing = bool(missing or report.missing_seasons)
+        if not has_missing:
             continue
         any_missing = True
         print(f"- {report.name}")
+        if report.missing_seasons:
+            formatted_seasons = ", ".join(f"S{season:02d}" for season in report.missing_seasons)
+            print(f"    Missing full seasons: {formatted_seasons}")
         for season, episodes in missing:
             formatted = ", ".join(format_episode(season, ep) for ep in episodes)
             print(f"    Season {season:02d}: {formatted}")
