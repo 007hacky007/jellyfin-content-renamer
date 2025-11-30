@@ -48,6 +48,7 @@ SHOW_NON_ALNUM = re.compile(r"[^0-9a-zA-ZáéěíóúůýščřžÁÉĚÍÓÚŮ�
 SHOW_WHITESPACE = re.compile(r"\s+")
 CSFD_ID_PATTERN = re.compile(r"/film/(\d+)-")
 ORIGIN_SPLITTER = re.compile(r"[,/]")
+SERIES_LINK_PATTERN = re.compile(r"/serie-(\d+)/")
 
 
 @dataclass
@@ -65,6 +66,7 @@ class CSFDShowCandidate:
     original_title: Optional[str]
     origins: List[str]
     url: str
+    total_seasons: Optional[int] = None
 
 
 @dataclass
@@ -116,6 +118,7 @@ class CSFDShowDetailParser(HTMLParser):
         self._capturing_header = False
         self._header_parts: List[str] = []
         self.header_title: Optional[str] = None
+        self._series_numbers: set[int] = set()
 
     def handle_starttag(self, tag: str, attrs: list) -> None:  # noqa: D401
         attr_map = dict(attrs)
@@ -144,6 +147,15 @@ class CSFDShowDetailParser(HTMLParser):
             country = attr_map.get("title") or attr_map.get("alt")
             if country:
                 self._current_name_country = country.strip()
+        href = attr_map.get("href", "")
+        match = SERIES_LINK_PATTERN.search(href)
+        if match:
+            try:
+                number = int(match.group(1))
+            except ValueError:
+                number = None
+            if number:
+                self._series_numbers.add(number)
 
     def handle_endtag(self, tag: str) -> None:  # noqa: D401
         if tag == "div" and self._in_origin:
@@ -203,6 +215,12 @@ class CSFDShowDetailParser(HTMLParser):
                 unique.append(cleaned)
         return unique
 
+    @property
+    def total_seasons(self) -> Optional[int]:
+        if not self._series_numbers:
+            return None
+        return max(self._series_numbers)
+
 
 def extract_csfd_id(url: str) -> Optional[int]:
     match = CSFD_ID_PATTERN.search(url)
@@ -221,11 +239,13 @@ def parse_csfd_show_detail(html: str) -> Dict[str, Optional[str]]:
     media_type = parser.media_type.strip() if parser.media_type else None
     localized = _select_localized_title(parser.names, parser.header_title)
     original = _select_original_title(parser.names, origins, parser.header_title, localized)
+    total_seasons = parser.total_seasons
     return {
         "localized_title": localized or parser.header_title,
         "original_title": original or parser.header_title,
         "origins": origins,
         "media_type": media_type,
+        "total_seasons": total_seasons,
     }
 
 
@@ -368,6 +388,7 @@ class CSFDLookup:
                     original_title=original_title,
                     origins=detail.get("origins") or [],
                     url=urllib.parse.urljoin("https://www.csfd.cz", url),
+                    total_seasons=detail.get("total_seasons"),
                 )
             )
         return built
@@ -648,13 +669,14 @@ def analyze_show(show_name: str, show_path: str, metadata: Optional[CSFDShowCand
         if episodes:
             max_episode = episodes[-1]
             report.missing_episodes = [num for num in range(1, max_episode + 1) if num not in episodes]
-    season_numbers = sorted(num for num in seasons if num > 0)
+    present_seasons = {num for num in seasons if num > 0}
+    max_local = max(present_seasons) if present_seasons else 0
+    metadata_total = metadata.total_seasons if metadata and metadata.total_seasons else None
+    max_expected = metadata_total if metadata_total and metadata_total > max_local else max_local
     missing_seasons: List[int] = []
-    if season_numbers:
-        max_season = season_numbers[-1]
-        present = set(season_numbers)
-        for season_number in range(1, max_season + 1):
-            if season_number not in present:
+    if max_expected:
+        for season_number in range(1, max_expected + 1):
+            if season_number not in present_seasons:
                 missing_seasons.append(season_number)
     return ShowReport(
         name=show_name,
@@ -675,8 +697,13 @@ def display_progress(show_idx: int, total: int, report: ShowReport) -> None:
     if report.csfd:
         origins = ", ".join(report.csfd.origins) if report.csfd.origins else "Unknown origin"
         original = report.csfd.original_title or "Unknown original title"
+        seasons_total = (
+            f" | Total seasons: {report.csfd.total_seasons}"
+            if report.csfd.total_seasons
+            else ""
+        )
         print(
-            f"  CSFD match: {report.csfd.title} ({report.csfd.year or '?'}) | {origins} | Original: {original}"
+            f"  CSFD match: {report.csfd.title} ({report.csfd.year or '?'}) | {origins} | Original: {original}{seasons_total}"
         )
     if not report.seasons:
         print("  No seasons detected (no season folders or SxxEyy markers).")

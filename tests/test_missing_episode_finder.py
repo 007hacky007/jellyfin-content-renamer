@@ -109,7 +109,13 @@ def test_csfd_lookup_prefers_series_even_if_films_first() -> None:
     details = {
         "/film/1-cerna-kniha/": {"media_type": "Film", "origins": ["Nizozemsko"], "original_title": "Zwartboek", "localized_title": "Černá kniha"},
         "/film/2-mala-cerna-skrinka/": {"media_type": "Film", "origins": ["USA"], "original_title": "Little Black Book", "localized_title": "Malá černá skříňka"},
-        "/film/3-black-books/": {"media_type": "Seriál", "origins": ["Velká Británie"], "original_title": "Black Books", "localized_title": "Černá kniha"},
+        "/film/3-black-books/": {
+            "media_type": "Seriál",
+            "origins": ["Velká Británie"],
+            "original_title": "Black Books",
+            "localized_title": "Černá kniha",
+            "total_seasons": 3,
+        },
     }
 
     with patch("missing_episode_finder.fetch_csfd_results", return_value=entries), patch(
@@ -122,6 +128,7 @@ def test_csfd_lookup_prefers_series_even_if_films_first() -> None:
     assert mock_detail.call_count == 3
     assert result is not None
     assert result.title == "Černá kniha"
+    assert result.total_seasons == 3
 
 
 def test_csfd_lookup_skips_entries_without_type() -> None:
@@ -141,6 +148,26 @@ def test_csfd_lookup_skips_entries_without_type() -> None:
         result = lookup.resolve("Some Series")
     assert result is not None
     assert result.title == "Nějaký seriál"
+
+
+def test_analyze_show_uses_csfd_total_seasons_for_trailing_gaps() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        show_dir = os.path.join(tmpdir, "Long Show")
+        season1 = os.path.join(show_dir, "Season 01")
+        season3 = os.path.join(show_dir, "Season 03")
+        _touch(os.path.join(season1, "Pilot S01E01.mkv"))
+        _touch(os.path.join(season3, "Return S03E01.mkv"))
+        metadata = CSFDShowCandidate(
+            id=10,
+            title="Long Show",
+            year=None,
+            original_title=None,
+            origins=[],
+            url="https://example.com",
+            total_seasons=5,
+        )
+        report = analyze_show("Long Show", show_dir, metadata=metadata)
+        assert report.missing_seasons == [2, 4, 5]
 def test_format_csfd_display_name_shows_both_titles_when_different() -> None:
     candidate = CSFDShowCandidate(
         id=1,
