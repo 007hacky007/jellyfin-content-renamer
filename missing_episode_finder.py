@@ -107,10 +107,15 @@ class CSFDShowDetailParser(HTMLParser):
         self._capturing_name = False
         self._name_suppressed = 0
         self._name_parts: List[str] = []
+        self._current_name_country: Optional[str] = None
         self.original_title: Optional[str] = None
         self.origins: List[str] = []
         self.media_type: Optional[str] = None
         self._capturing_type = False
+        self.names: List[Tuple[Optional[str], str]] = []
+        self._capturing_header = False
+        self._header_parts: List[str] = []
+        self.header_title: Optional[str] = None
 
     def handle_starttag(self, tag: str, attrs: list) -> None:  # noqa: D401
         attr_map = dict(attrs)
@@ -122,17 +127,23 @@ class CSFDShowDetailParser(HTMLParser):
             self._origin_parts.clear()
         elif self._in_origin and tag == "span":
             self._origin_span_depth += 1
+        if tag == "h1":
+            self._capturing_header = True
+            self._header_parts.clear()
         if tag == "ul" and "film-names" in class_set:
             self._in_names_list = True
-        elif tag == "li" and self._in_names_list and not self.original_title:
-            if "more-names" in class_set:
-                return
+        elif tag == "li" and self._in_names_list:
             self._capturing_name = True
             self._name_parts.clear()
+            self._current_name_country = None
         elif tag == "span" and self._capturing_name and ("span-more-small" in class_set or "normal" in class_set or "info" in class_set):
             self._name_suppressed += 1
         if tag == "span" and "type" in class_set and not self.media_type:
             self._capturing_type = True
+        if self._capturing_name and tag == "img":
+            country = attr_map.get("title") or attr_map.get("alt")
+            if country:
+                self._current_name_country = country.strip()
 
     def handle_endtag(self, tag: str) -> None:  # noqa: D401
         if tag == "div" and self._in_origin:
@@ -140,13 +151,22 @@ class CSFDShowDetailParser(HTMLParser):
             self.origins = self._finalize_origins()
         elif tag == "span" and self._in_origin and self._origin_span_depth > 0:
             self._origin_span_depth -= 1
+        if tag == "h1" and self._capturing_header:
+            self._capturing_header = False
+            header = "".join(self._header_parts).strip()
+            if header:
+                self.header_title = header
         if tag == "li" and self._capturing_name:
             self._capturing_name = False
             if not self.original_title:
                 candidate = "".join(self._name_parts).strip()
                 if candidate:
                     self.original_title = candidate
+            candidate = "".join(self._name_parts).strip()
+            if candidate:
+                self.names.append((self._current_name_country, candidate))
             self._name_parts.clear()
+            self._current_name_country = None
         elif tag == "ul" and self._in_names_list:
             self._in_names_list = False
         elif tag == "span" and self._capturing_name and self._name_suppressed > 0:
@@ -162,6 +182,8 @@ class CSFDShowDetailParser(HTMLParser):
         if self._capturing_type:
             current = (self.media_type or "") + data
             self.media_type = current.strip()
+        if self._capturing_header:
+            self._header_parts.append(data)
 
     def _finalize_origins(self) -> List[str]:
         raw = "".join(self._origin_parts).strip()
@@ -171,8 +193,14 @@ class CSFDShowDetailParser(HTMLParser):
         values = [part.strip(" ,") for part in ORIGIN_SPLITTER.split(country_segment) if part.strip(" ,")]
         unique: List[str] = []
         for value in values:
-            if value and value not in unique:
-                unique.append(value)
+            cleaned = value.strip()
+            if not cleaned:
+                continue
+            lowered = cleaned.casefold()
+            if "min" in lowered and any(char.isdigit() for char in lowered):
+                continue
+            if cleaned and cleaned not in unique:
+                unique.append(cleaned)
         return unique
 
 
@@ -189,10 +217,67 @@ def extract_csfd_id(url: str) -> Optional[int]:
 def parse_csfd_show_detail(html: str) -> Dict[str, Optional[str]]:
     parser = CSFDShowDetailParser()
     parser.feed(html)
-    original = parser.original_title.strip() if parser.original_title else None
     origins = parser.origins
     media_type = parser.media_type.strip() if parser.media_type else None
-    return {"original_title": original, "origins": origins, "media_type": media_type}
+    localized = _select_localized_title(parser.names, parser.header_title)
+    original = _select_original_title(parser.names, origins, parser.header_title, localized)
+    return {
+        "localized_title": localized or parser.header_title,
+        "original_title": original or parser.header_title,
+        "origins": origins,
+        "media_type": media_type,
+    }
+
+
+def _select_localized_title(
+    names: Sequence[Tuple[Optional[str], str]], header_title: Optional[str]
+) -> Optional[str]:
+    preferred_countries = ["Česko"]
+    for preferred in preferred_countries:
+        pref_cf = preferred.casefold()
+        for country, title in names:
+            if not title:
+                continue
+            if (country or "").casefold() == pref_cf:
+                cleaned = title.strip()
+                if cleaned:
+                    return cleaned
+    header_clean = header_title.strip() if header_title else None
+    if header_clean:
+        return header_clean
+    for country, title in names:
+        if not title:
+            continue
+        if (country or "").casefold() == "slovensko" and title.strip():
+            return title.strip()
+    for _, title in names:
+        cleaned = title.strip()
+        if cleaned:
+            return cleaned
+    return header_clean
+
+
+def _select_original_title(
+    names: Sequence[Tuple[Optional[str], str]],
+    origins: Sequence[str],
+    header_title: Optional[str],
+    localized: Optional[str],
+) -> Optional[str]:
+    localized_cf = (localized or "").casefold()
+    for origin in origins:
+        origin_cf = origin.casefold()
+        for country, title in names:
+            if not title:
+                continue
+            if (country or "").casefold() == origin_cf:
+                cleaned = title.strip()
+                if cleaned:
+                    return cleaned
+    for _, title in names:
+        cleaned = title.strip()
+        if cleaned and cleaned.casefold() != localized_cf:
+            return cleaned
+    return header_title.strip() if header_title else None
 
 
 def _decode_csfd_payload(raw: bytes, encoding: str) -> str:
@@ -265,16 +350,22 @@ class CSFDLookup:
             detail = fetch_csfd_show_detail(url)
             if not detail:
                 continue
-            media_type = (detail.get("media_type") or "").lower()
-            if media_type and "seri" not in media_type:
+            media_type = (detail.get("media_type") or "").casefold()
+            if not media_type:
+                continue
+            if "film" in media_type:
+                continue
+            if "seri" not in media_type:
                 continue
             year = entry.get("year") if isinstance(entry.get("year"), int) else None
+            localized_title = (detail.get("localized_title") or title).strip() or title
+            original_title = detail.get("original_title") or localized_title
             built.append(
                 CSFDShowCandidate(
                     id=extract_csfd_id(url),
-                    title=title,
+                    title=localized_title,
                     year=year,
-                    original_title=detail.get("original_title") or title,
+                    original_title=original_title,
                     origins=detail.get("origins") or [],
                     url=urllib.parse.urljoin("https://www.csfd.cz", url),
                 )

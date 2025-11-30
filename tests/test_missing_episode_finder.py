@@ -107,9 +107,9 @@ def test_csfd_lookup_prefers_series_even_if_films_first() -> None:
         {"title": "Black Books", "year": 2000, "url": "/film/3-black-books/"},
     ]
     details = {
-        "/film/1-cerna-kniha/": {"media_type": "Film", "origins": ["Nizozemsko"], "original_title": "Zwartboek"},
-        "/film/2-mala-cerna-skrinka/": {"media_type": "Film", "origins": ["USA"], "original_title": "Little Black Book"},
-        "/film/3-black-books/": {"media_type": "Seriál", "origins": ["Velká Británie"], "original_title": "Black Books"},
+        "/film/1-cerna-kniha/": {"media_type": "Film", "origins": ["Nizozemsko"], "original_title": "Zwartboek", "localized_title": "Černá kniha"},
+        "/film/2-mala-cerna-skrinka/": {"media_type": "Film", "origins": ["USA"], "original_title": "Little Black Book", "localized_title": "Malá černá skříňka"},
+        "/film/3-black-books/": {"media_type": "Seriál", "origins": ["Velká Británie"], "original_title": "Black Books", "localized_title": "Černá kniha"},
     }
 
     with patch("missing_episode_finder.fetch_csfd_results", return_value=entries), patch(
@@ -121,9 +121,26 @@ def test_csfd_lookup_prefers_series_even_if_films_first() -> None:
 
     assert mock_detail.call_count == 3
     assert result is not None
-    assert result.title == "Black Books"
+    assert result.title == "Černá kniha"
 
 
+def test_csfd_lookup_skips_entries_without_type() -> None:
+    entries = [
+        {"title": "Some Film", "year": 2010, "url": "/film/10-some-film/"},
+        {"title": "Some Series", "year": 2011, "url": "/film/11-some-series/"},
+    ]
+    details = {
+        "/film/10-some-film/": {"media_type": "", "origins": ["USA"], "original_title": "Some Film", "localized_title": "Some Film"},
+        "/film/11-some-series/": {"media_type": "Seriál", "origins": ["USA"], "original_title": "Some Series", "localized_title": "Nějaký seriál"},
+    }
+    with patch("missing_episode_finder.fetch_csfd_results", return_value=entries), patch(
+        "missing_episode_finder.fetch_csfd_show_detail",
+        side_effect=lambda url: details[url],
+    ):
+        lookup = CSFDLookup(max_results=5)
+        result = lookup.resolve("Some Series")
+    assert result is not None
+    assert result.title == "Nějaký seriál"
 def test_format_csfd_display_name_shows_both_titles_when_different() -> None:
     candidate = CSFDShowCandidate(
         id=1,
