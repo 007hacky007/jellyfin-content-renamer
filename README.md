@@ -16,4 +16,5 @@
 - Optional skip suggestions when names already match metadata.
 - `--auto-skip-matches` flag to bypass items that already align with CSFD results.
 - Missing-episode detector with optional curses picker when multiple show folders match your filter, and reports both per-season gaps and whole missing seasons.
+- When CSFD lookups are enabled, per-season episode counts and total season numbers are pulled directly from ČSFD, so gaps beyond your local files (e.g., unseen finales or entire later seasons) are surfaced automatically.
 - Built-in ČSFD show selector that enriches progress output with official metadata and lets you disambiguate remakes directly in the TUI or CLI.

@@ -48,7 +48,12 @@ SHOW_NON_ALNUM = re.compile(r"[^0-9a-zA-ZáéěíóúůýščřžÁÉĚÍÓÚŮ�
 SHOW_WHITESPACE = re.compile(r"\s+")
 CSFD_ID_PATTERN = re.compile(r"/film/(\d+)-")
 ORIGIN_SPLITTER = re.compile(r"[,/]")
-SERIES_LINK_PATTERN = re.compile(r"/serie-(\d+)/")
+SERIES_LINK_PATTERN = re.compile(r"serie-(\d+)/")
+SERIES_COUNT_PATTERN = re.compile(r"Série\s*\((\d+)\)")
+SEASON_TITLE_PATTERN = re.compile(r"(?i)(?:série|séria|season)\s*(\d+)")
+EPISODE_COUNT_PATTERN = re.compile(
+    r"(?i)(\d+)\s*(?:díl(?:y|ů)?|epizod(?:y|a)?|episode(?:s)?|část(?:i)?)"
+)
 
 
 @dataclass
@@ -66,6 +71,8 @@ class CSFDShowCandidate:
     original_title: Optional[str]
     origins: List[str]
     url: str
+    total_seasons: Optional[int] = None
+    season_episode_counts: Dict[int, int] = field(default_factory=dict)
     total_seasons: Optional[int] = None
 
 
@@ -119,6 +126,18 @@ class CSFDShowDetailParser(HTMLParser):
         self._header_parts: List[str] = []
         self.header_title: Optional[str] = None
         self._series_numbers: set[int] = set()
+        self._capturing_series_heading = False
+        self._series_heading_parts: List[str] = []
+        self._series_heading_total: Optional[int] = None
+        self._series_list_depth = 0
+        self._in_series_listing = False
+        self._current_season_number: Optional[int] = None
+        self._capturing_season_title = False
+        self._season_title_parts: List[str] = []
+        self._capturing_episode_info = False
+        self._episode_info_parts: List[str] = []
+        self._episode_info_depth = 0
+        self.season_episode_counts: Dict[int, int] = {}
 
     def handle_starttag(self, tag: str, attrs: list) -> None:  # noqa: D401
         attr_map = dict(attrs)
@@ -130,9 +149,23 @@ class CSFDShowDetailParser(HTMLParser):
             self._origin_parts.clear()
         elif self._in_origin and tag == "span":
             self._origin_span_depth += 1
+        if tag == "div" and "film-episodes-list" in class_set:
+            self._in_series_listing = True
+            self._series_list_depth = 1
+        elif self._in_series_listing and tag == "div":
+            self._series_list_depth += 1
         if tag == "h1":
             self._capturing_header = True
             self._header_parts.clear()
+        if tag == "h3":
+            self._capturing_series_heading = True
+            self._series_heading_parts.clear()
+            if self._in_series_listing and ("film-title" in class_set or "film-title" in class_names):
+                self._current_season_number = None
+                self._capturing_season_title = False
+                self._season_title_parts.clear()
+                self._capturing_episode_info = False
+                self._episode_info_parts.clear()
         if tag == "ul" and "film-names" in class_set:
             self._in_names_list = True
         elif tag == "li" and self._in_names_list:
@@ -147,6 +180,19 @@ class CSFDShowDetailParser(HTMLParser):
             country = attr_map.get("title") or attr_map.get("alt")
             if country:
                 self._current_name_country = country.strip()
+        if (
+            tag == "a"
+            and self._in_series_listing
+            and "film-title-name" in class_set
+        ):
+            self._capturing_season_title = True
+            self._season_title_parts.clear()
+        if tag == "span" and self._in_series_listing and "film-title-info" in class_set:
+            self._capturing_episode_info = True
+            self._episode_info_depth = 1
+            self._episode_info_parts.clear()
+        elif tag == "span" and self._capturing_episode_info:
+            self._episode_info_depth += 1
         href = attr_map.get("href", "")
         match = SERIES_LINK_PATTERN.search(href)
         if match:
@@ -163,11 +209,49 @@ class CSFDShowDetailParser(HTMLParser):
             self.origins = self._finalize_origins()
         elif tag == "span" and self._in_origin and self._origin_span_depth > 0:
             self._origin_span_depth -= 1
+        if tag == "div" and self._in_series_listing:
+            self._series_list_depth -= 1
+            if self._series_list_depth <= 0:
+                self._in_series_listing = False
+                self._series_list_depth = 0
         if tag == "h1" and self._capturing_header:
             self._capturing_header = False
             header = "".join(self._header_parts).strip()
             if header:
                 self.header_title = header
+        if tag == "h3" and self._capturing_series_heading:
+            self._capturing_series_heading = False
+            content = "".join(self._series_heading_parts)
+            match = SERIES_COUNT_PATTERN.search(content)
+            if match:
+                try:
+                    self._series_heading_total = int(match.group(1))
+                except ValueError:
+                    self._series_heading_total = None
+        if tag == "a" and self._capturing_season_title:
+            self._capturing_season_title = False
+            title_text = "".join(self._season_title_parts)
+            match = SEASON_TITLE_PATTERN.search(title_text)
+            if match:
+                try:
+                    self._current_season_number = int(match.group(1))
+                except ValueError:
+                    self._current_season_number = None
+            self._season_title_parts.clear()
+        if tag == "span" and self._capturing_episode_info:
+            self._episode_info_depth -= 1
+            if self._episode_info_depth <= 0:
+                self._capturing_episode_info = False
+                info_text = "".join(self._episode_info_parts)
+                match = EPISODE_COUNT_PATTERN.search(info_text)
+                if match and self._current_season_number:
+                    try:
+                        count = int(match.group(1))
+                    except ValueError:
+                        count = None
+                    if count:
+                        self.season_episode_counts.setdefault(self._current_season_number, count)
+                self._episode_info_parts.clear()
         if tag == "li" and self._capturing_name:
             self._capturing_name = False
             if not self.original_title:
@@ -196,6 +280,12 @@ class CSFDShowDetailParser(HTMLParser):
             self.media_type = current.strip()
         if self._capturing_header:
             self._header_parts.append(data)
+        if self._capturing_season_title:
+            self._season_title_parts.append(data)
+        if self._capturing_episode_info:
+            self._episode_info_parts.append(data)
+        if self._capturing_series_heading:
+            self._series_heading_parts.append(data)
 
     def _finalize_origins(self) -> List[str]:
         raw = "".join(self._origin_parts).strip()
@@ -217,6 +307,8 @@ class CSFDShowDetailParser(HTMLParser):
 
     @property
     def total_seasons(self) -> Optional[int]:
+        if self._series_heading_total:
+            return self._series_heading_total
         if not self._series_numbers:
             return None
         return max(self._series_numbers)
@@ -246,6 +338,7 @@ def parse_csfd_show_detail(html: str) -> Dict[str, Optional[str]]:
         "origins": origins,
         "media_type": media_type,
         "total_seasons": total_seasons,
+        "season_episode_counts": parser.season_episode_counts,
     }
 
 
@@ -312,20 +405,72 @@ def _decode_csfd_payload(raw: bytes, encoding: str) -> str:
         return raw.decode("utf-8", errors="ignore")
 
 
-@lru_cache(maxsize=128)
-def fetch_csfd_show_detail(url: str) -> Dict[str, Optional[str]]:
-    if not url:
-        return {}
-    absolute_url = urllib.parse.urljoin("https://www.csfd.cz", url)
-    request = urllib.request.Request(absolute_url, headers=build_headers())
+def _download_csfd_html(url: str) -> str:
+    request = urllib.request.Request(url, headers=build_headers())
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             raw = response.read()
             encoding = response.headers.get("Content-Encoding", "")
     except urllib.error.URLError:  # pragma: no cover - network failure
+        return ""
+    return _decode_csfd_payload(raw, encoding)
+
+
+def _with_query_param(url: str, key: str, value: Optional[str]) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    query_items = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    filtered = [(k, v) for k, v in query_items if k != key]
+    if value is not None:
+        filtered.append((key, value))
+    new_query = urllib.parse.urlencode(filtered)
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, new_query, parsed.fragment))
+
+
+def _merge_paginated_episode_counts(base_url: str, detail: Dict[str, Optional[str]]) -> None:
+    total = detail.get("total_seasons")
+    if not isinstance(total, int) or total <= 0:
+        return
+    season_counts = dict(detail.get("season_episode_counts") or {})
+    if len(season_counts) >= total:
+        detail["season_episode_counts"] = season_counts
+        return
+    normalized_base = _with_query_param(base_url, "seriePage", None)
+    page = 2
+    max_pages = min(total, 20)
+    while page <= max_pages and len(season_counts) < total:
+        page_url = _with_query_param(normalized_base, "seriePage", str(page))
+        html = _download_csfd_html(page_url)
+        if not html:
+            break
+        page_detail = parse_csfd_show_detail(html)
+        new_counts = page_detail.get("season_episode_counts") or {}
+        added = False
+        for season, count in new_counts.items():
+            if season not in season_counts and count:
+                season_counts[season] = count
+                added = True
+        extra_total = page_detail.get("total_seasons")
+        if isinstance(extra_total, int) and extra_total > total:
+            total = extra_total
+            detail["total_seasons"] = total
+            max_pages = min(total, 20)
+        if not added:
+            break
+        page += 1
+    detail["season_episode_counts"] = season_counts
+
+
+@lru_cache(maxsize=128)
+def fetch_csfd_show_detail(url: str) -> Dict[str, Optional[str]]:
+    if not url:
         return {}
-    html = _decode_csfd_payload(raw, encoding)
-    return parse_csfd_show_detail(html)
+    absolute_url = urllib.parse.urljoin("https://www.csfd.cz", url)
+    html = _download_csfd_html(absolute_url)
+    if not html:
+        return {}
+    detail = parse_csfd_show_detail(html)
+    _merge_paginated_episode_counts(absolute_url, detail)
+    return detail
 
 
 class CSFDLookup:
@@ -389,6 +534,7 @@ class CSFDLookup:
                     origins=detail.get("origins") or [],
                     url=urllib.parse.urljoin("https://www.csfd.cz", url),
                     total_seasons=detail.get("total_seasons"),
+                    season_episode_counts=detail.get("season_episode_counts") or {},
                 )
             )
         return built
@@ -661,14 +807,18 @@ def analyze_show(show_name: str, show_path: str, metadata: Optional[CSFDShowCand
                 report = seasons.setdefault(season_number, SeasonReport(season=season_number))
                 if episode_candidate is not None:
                     report.episodes_present.append(episode_candidate)
+    episode_expectations = metadata.season_episode_counts if metadata else {}
     for report in seasons.values():
         if not report.episodes_present:
             continue
         episodes = normalize_episode_numbers(report.episodes_present)
         report.episodes_present = episodes
         if episodes:
-            max_episode = episodes[-1]
-            report.missing_episodes = [num for num in range(1, max_episode + 1) if num not in episodes]
+            expected_max = episodes[-1]
+            metadata_count = episode_expectations.get(report.season)
+            if metadata_count and metadata_count > expected_max:
+                expected_max = metadata_count
+            report.missing_episodes = [num for num in range(1, expected_max + 1) if num not in episodes]
     present_seasons = {num for num in seasons if num > 0}
     max_local = max(present_seasons) if present_seasons else 0
     metadata_total = metadata.total_seasons if metadata and metadata.total_seasons else None

@@ -5,8 +5,10 @@ from unittest.mock import patch
 from missing_episode_finder import (
     CSFDLookup,
     CSFDShowCandidate,
+    fetch_csfd_show_detail,
     analyze_show,
     derive_show_search_query,
+    parse_csfd_show_detail,
     format_csfd_display_name,
 )
 
@@ -52,6 +54,99 @@ def test_analyze_show_detects_whole_missing_seasons() -> None:
         _touch(os.path.join(season_three, "Return S03E01.mkv"))
         report = analyze_show("Gap Show", show_dir)
         assert report.missing_seasons == [2]
+
+
+def test_analyze_show_uses_metadata_episode_counts() -> None:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        show_dir = os.path.join(tmpdir, "Metadata Show")
+        season_dir = os.path.join(show_dir, "Season 02")
+        _touch(os.path.join(season_dir, "Episode S02E01.mkv"))
+        _touch(os.path.join(season_dir, "Episode S02E02.mkv"))
+        metadata = CSFDShowCandidate(
+            id=123,
+            title="Metadata Show",
+            year=None,
+            original_title=None,
+            origins=[],
+            url="https://example.com",
+            season_episode_counts={2: 4},
+        )
+        report = analyze_show("Metadata Show", show_dir, metadata=metadata)
+        assert report.seasons[2].missing_episodes == [3, 4]
+
+
+def test_parse_csfd_show_detail_extracts_episode_counts() -> None:
+    html = """
+    <div class="film-episodes-list">
+        <ul>
+            <li>
+                <h3 class="film-title">
+                    <a href="/film/1/serie-1/" class="film-title-name">Série 1</a>
+                    <span class="film-title-info"><span class="info">(1989)</span> - 13 epizod</span>
+                </h3>
+            </li>
+            <li>
+                <h3 class="film-title">
+                    <a href="/film/1/serie-2/" class="film-title-name">Série 2</a>
+                    <span class="film-title-info"><span class="info">(1990)</span> - 22 epizod</span>
+                </h3>
+            </li>
+        </ul>
+    </div>
+    """
+    detail = parse_csfd_show_detail(html)
+    assert detail["season_episode_counts"] == {1: 13, 2: 22}
+
+
+def test_fetch_csfd_show_detail_handles_paginated_seasons() -> None:
+    page_one = """
+    <div class="box-header"><h3>Série (4)</h3></div>
+    <div class="film-episodes-list">
+        <ul>
+            <li>
+                <h3 class="film-title">
+                    <a href="/film/demo/serie-1/" class="film-title-name">Série 1</a>
+                    <span class="film-title-info"><span class="info">(1989)</span> - 13 epizod</span>
+                </h3>
+            </li>
+            <li>
+                <h3 class="film-title">
+                    <a href="/film/demo/serie-2/" class="film-title-name">Série 2</a>
+                    <span class="film-title-info"><span class="info">(1990)</span> - 22 epizod</span>
+                </h3>
+            </li>
+        </ul>
+    </div>
+    """
+    page_two = """
+    <div class="film-episodes-list">
+        <ul>
+            <li>
+                <h3 class="film-title">
+                    <a href="/film/demo/serie-3/" class="film-title-name">Série 3</a>
+                    <span class="film-title-info"><span class="info">(1991)</span> - 24 epizody</span>
+                </h3>
+            </li>
+            <li>
+                <h3 class="film-title">
+                    <a href="/film/demo/serie-4/" class="film-title-name">Série 4</a>
+                    <span class="film-title-info"><span class="info">(1992)</span> - 22 epizody</span>
+                </h3>
+            </li>
+        </ul>
+    </div>
+    """
+
+    def fake_download(url: str) -> str:
+        if "seriePage=2" in url:
+            return page_two
+        return page_one
+
+    with patch("missing_episode_finder._download_csfd_html", side_effect=fake_download) as mock_download:
+        detail = fetch_csfd_show_detail("https://www.csfd.cz/film/demo/prehled/")
+
+    assert detail["season_episode_counts"] == {1: 13, 2: 22, 3: 24, 4: 22}
+    assert mock_download.call_count == 2
 
 
 def test_derive_show_search_query_strips_years_and_symbols() -> None:
