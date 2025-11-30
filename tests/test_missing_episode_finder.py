@@ -1,7 +1,8 @@
 import os
 import tempfile
+from unittest.mock import patch
 
-from missing_episode_finder import analyze_show
+from missing_episode_finder import CSFDLookup, analyze_show, derive_show_search_query
 
 
 def _touch(path: str) -> None:
@@ -45,3 +46,29 @@ def test_analyze_show_detects_whole_missing_seasons() -> None:
         _touch(os.path.join(season_three, "Return S03E01.mkv"))
         report = analyze_show("Gap Show", show_dir)
         assert report.missing_seasons == [2]
+
+
+def test_derive_show_search_query_strips_years_and_symbols() -> None:
+    assert derive_show_search_query("Kancl (2005) Season_04") == "Kancl Season 04"
+
+
+def test_csfd_lookup_uses_custom_choice_and_details() -> None:
+    entries = [
+        {"title": "Kancl", "year": 2005, "url": "/film/101-kancl/"},
+        {"title": "Kancl", "year": 2014, "url": "/film/202-kancl/"},
+    ]
+    details = {
+        "/film/101-kancl/": {"original_title": "The Office (US)", "origins": ["USA"], "media_type": "seriál"},
+        "/film/202-kancl/": {"original_title": "Kancl (CZ)", "origins": ["Česko"], "media_type": "seriál"},
+    }
+    with patch("missing_episode_finder.fetch_csfd_results", return_value=entries) as mock_search, patch(
+        "missing_episode_finder.fetch_csfd_show_detail",
+        side_effect=lambda url: details[url],
+    ) as mock_detail:
+        lookup = CSFDLookup(max_results=5, chooser=lambda _, options: options[1])
+        result = lookup.resolve("Kancl (2005)")
+    assert mock_search.call_args[0][0] == "Kancl"
+    assert mock_detail.call_count == 2
+    assert result is not None
+    assert result.origins == ["Česko"]
+    assert result.original_title == "Kancl (CZ)"
